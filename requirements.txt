@@ -8,3 +8,4 @@ dj-database-url
 python-dotenv
 google-generativeai
 groq
+django-import-export
