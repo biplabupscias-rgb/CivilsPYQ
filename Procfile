@@ -1,0 +1,1 @@
+web: gunicorn exam_prep_app_backend.wsgi
