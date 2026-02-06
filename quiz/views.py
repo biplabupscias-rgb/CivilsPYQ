@@ -223,13 +223,13 @@ def save_user_answer(request):
         # 1. Get the Question
         question = Question.objects.get(id=data['question_id'])
         
-        # 2. Get the Option (if any)
+        # 2. Get the Option (Safe Lookup)
         selected_option = None
         opt_id = data.get('selected_option_id')
         if opt_id not in [None, '', 'null']:
             selected_option = Option.objects.get(id=opt_id)
 
-        # 3. Parse JSON & Booleans Safely
+        # 3. Parse JSON & Booleans Safely (Preserving your robustness)
         eliminated_raw = data.get('eliminated_options', '[]')
         if isinstance(eliminated_raw, str):
             try:
@@ -248,29 +248,33 @@ def save_user_answer(request):
         except (ValueError, TypeError):
             confidence_val = 100
 
-        # 4. GET SOURCE MODE (Crucial for your dashboard filter)
-        # Default to 'practice' if not sent
+        # 4. Get Context
         source_mode = data.get('source_mode', 'practice') 
         session_id = data.get('session_id', None)
 
-        # 5. CREATE THE LOG ENTRY
-        UserAnswerLog.objects.create(
+        # 5. THE FIX: UPDATE OR CREATE
+        # Instead of .create() (which adds a new row), we look for an existing row
+        # for this User + Question + Session and UPDATE it.
+        log, created = UserAnswerLog.objects.update_or_create(
             user=request.user,
             question=question,
-            selected_option=selected_option,
-            
-            is_correct=is_correct_val,
-            is_skipped=is_skipped_val,
-            is_bookmarked=is_bookmarked_val,
-            
-            time_taken_seconds=int(data.get('time_taken_seconds', 0)),
-            confidence_score=confidence_val,
-            eliminated_options=eliminated_list,
-            source_mode=source_mode,  # <--- Saving the tag
-            session_id=session_id
+            session_id=session_id, # Crucial: Updates the log for THIS specific exam attempt
+            defaults={
+                'selected_option': selected_option,
+                'is_correct': is_correct_val,
+                'is_skipped': is_skipped_val,
+                'is_bookmarked': is_bookmarked_val,
+                
+                # OVERWRITE Logic: We trust the App's cumulative time
+                'time_taken_seconds': int(data.get('time_taken_seconds', 0)), 
+                
+                'confidence_score': confidence_val,
+                'eliminated_options': eliminated_list,
+                'source_mode': source_mode
+            }
         )
 
-        return Response({"message": "Saved"}, status=status.HTTP_201_CREATED)
+        return Response({"message": "State Updated"}, status=status.HTTP_200_OK)
 
     except Exception as e:
         print(f"ERROR SAVING ANSWER: {e}") 
@@ -754,9 +758,27 @@ class ExamAnalysisAPI(APIView):
                 
             # Heatmap
             subj = log.question.subject
-            if subj not in heatmap_stats: heatmap_stats[subj] = {'total': 0, 'correct': 0}
-            heatmap_stats[subj]['total'] += 1
-            if log.is_correct: heatmap_stats[subj]['correct'] += 1
+            
+            if subj not in heatmap_stats: 
+                heatmap_stats[subj] = {
+                    'attempted': 0, 'correct': 0, 'wrong': 0, 'skipped': 0,
+                    'total_time': 0, 'silly_mistakes': 0
+                }
+            
+            # Count Skips separately
+            if log.is_skipped:
+                heatmap_stats[subj]['skipped'] += 1
+            else:
+                heatmap_stats[subj]['attempted'] += 1
+                heatmap_stats[subj]['total_time'] += log.time_taken_seconds
+                
+                if log.is_correct:
+                    heatmap_stats[subj]['correct'] += 1
+                else:
+                    heatmap_stats[subj]['wrong'] += 1
+                    # Track "Rushed Errors" (<15s) for the footer
+                    if log.time_taken_seconds < 15:
+                        heatmap_stats[subj]['silly_mistakes'] += 1
             
             # Full Logs
             full_logs_out.append({
@@ -789,8 +811,32 @@ class ExamAnalysisAPI(APIView):
 
         heatmap_list = []
         for subj, stats in heatmap_stats.items():
-            acc = (stats['correct'] / stats['total']) * 100 if stats['total'] > 0 else 0
-            heatmap_list.append({'subject': subj, 'accuracy': round(acc, 1), 'total': stats['total']})
+            attempts = stats['attempted']
+            correct = stats['correct']
+            wrong = stats['wrong']
+            skipped = stats['skipped']
+            
+            # Only show if the user interacted with the subject at all
+            if attempts > 0:
+                acc = (correct / attempts) * 100 if attempts > 0 else 0.0
+                
+                # UPSC Marking Scheme (+2, -0.66)
+                net_marks = (correct * 2) - (wrong * 0.66)
+                subj_lost_marks = wrong * 0.66
+                avg_time = stats['total_time'] / attempts if attempts > 0 else 0
+                
+                heatmap_list.append({
+                    'subject': subj, 
+                    'accuracy': round(acc, 1),
+                    'net_marks': round(net_marks, 2),
+                    'lost_marks': round(subj_lost_marks, 2),
+                    'avg_time': round(avg_time, 0),
+                    'correct': correct,
+                    'wrong': wrong,
+                    'skipped': skipped,
+                    'silly_mistakes': stats['silly_mistakes']
+                })
+        
         heatmap_list.sort(key=lambda x: x['accuracy'])
 
         return {
