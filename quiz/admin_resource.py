@@ -57,7 +57,7 @@ class QuestionResource(resources.ModelResource):
         if 'exam_name' not in row or not row['exam_name']:
             row['exam_name'] = 'UPSC CSE'
 
-    def after_save_instance(self, instance, using_transactions, dry_run):
+    def after_save_instance(self, instance, using_transactions, dry_run, **kwargs):
         if dry_run: return 
 
         row = instance.dataset_row
