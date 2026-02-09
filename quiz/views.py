@@ -942,31 +942,34 @@ class ExamAnalysisAPI(APIView):
         if target_subject is None and subject_param and str(subject_param).strip():
             target_subject = str(subject_param).strip()
 
-        # B. Construct History Filter (Purity Filter) [PRESERVED]
+        # --- B. HISTORY FILTERING (NEW TAG-BASED LOGIC) ---
+        
+        # 1. Base Query: Get all exams for this user & exam name (e.g., UPSC CSE)
         history_query = UserAnswerLog.objects.filter(
             user=user,
             session_id__isnull=False,
             question__exam_name=context_exam, 
             source_mode='exam'
-        ).exclude(session_id=session_id)
+        ).exclude(session_id=session_id) # Don't show the current session
 
-        if target_subject:
-            # SCENARIO: SUBJECT MODE [PRESERVED]
-            dirty_sessions = UserAnswerLog.objects.filter(
-                user=user, session_id__isnull=False, source_mode='exam'
-            ).exclude(
-                Q(question__subject=target_subject) | Q(question__tags__icontains=target_subject)
-            ).values_list('session_id', flat=True)
-            
-            history_query = history_query.exclude(session_id__in=dirty_sessions)
+        # 2. Get URL Params (What Flutter is asking for)
+        year_param = request.query_params.get('year')
+        subject_param = request.query_params.get('subject')
 
-        elif target_year:
-            # SCENARIO: YEAR MODE [PRESERVED]
-            dirty_sessions = UserAnswerLog.objects.filter(
-                user=user, session_id__isnull=False, source_mode='exam'
-            ).exclude(question__year=target_year).values_list('session_id', flat=True)
-            
-            history_query = history_query.exclude(session_id__in=dirty_sessions)
+        # 3. Apply STRICT Filter based on Session ID Tag
+        # This matches the new ID format we created in Flutter (e.g., "year_2025_..." or "subj_Polity_...")
+        
+        if year_param and str(year_param).strip().isdigit():
+            # If User asks for 2025 History, ONLY show sessions starting with "year_2025_"
+            target_tag = f"year_{year_param}_"
+            history_query = history_query.filter(session_id__startswith=target_tag)
+
+        elif subject_param:
+            # If User asks for Polity History, ONLY show sessions starting with "subj_Polity_"
+            # We clean the string to match Flutter's ID generation (alphanumeric only)
+            clean_subj = "".join([c for c in subject_param if c.isalnum()])
+            target_tag = f"subj_{clean_subj}_"
+            history_query = history_query.filter(session_id__startswith=target_tag)
         
         # Get Final Session IDs [PRESERVED]
         past_session_ids = history_query.values_list('session_id', flat=True).distinct()
