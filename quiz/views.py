@@ -14,7 +14,7 @@ from django.db.models import Avg
 from django.db.models import Max
 from django.utils import timezone
 from django.db.models.functions import Cast
-from django.db.models import FloatField
+from django.db.models import Count, Q, Avg, Case, When, FloatField
 
 from .models import Question, KnowledgeConcept, KeywordAnalysis, TopicMedia, UserAnswerLog, Option, UserQuestionNote, ExamCutoff
 from .serializers import QuestionSerializer, KnowledgeConceptSerializer, KeywordAnalysisSerializer
@@ -377,7 +377,17 @@ def user_dashboard_api(request):
         })
 
     # --- 1. BASIC STATS (PRESERVED) ---
-    accuracy_data = queryset.aggregate(avg_score=Avg(Cast('is_correct', FloatField())))
+    # --- 1. BASIC STATS (FIXED FOR POSTGRES) ---
+    # Logic: "If is_correct is True, count it as 1.0. If False, count as 0.0. Then Average it."
+    accuracy_data = queryset.aggregate(
+        avg_score=Avg(
+            Case(
+                When(is_correct=True, then=1.0),
+                default=0.0,
+                output_field=FloatField()
+            )
+        )
+    )
     accuracy = (accuracy_data['avg_score'] or 0.0) * 100
     streak_count = queryset.dates('attempted_at', 'day').count()
 
@@ -606,6 +616,8 @@ def remove_bookmark_api(request):
     
     return Response({"message": "Bookmark and note removed"}, status=200)
     # --- 8. THE TIME MACHINE (History Graph API) ---
+# quiz/views.py
+
 class UserHistoryAPI(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -617,36 +629,50 @@ class UserHistoryAPI(APIView):
         if not logs.exists():
             return Response({"dates": [], "logic": [], "precision": []})
 
-        # Python-side Aggregation (Safe for SQLite & Postgres)
         from collections import defaultdict
-        data_points = defaultdict(lambda: {'logic_correct': 0, 'logic_total': 0, 'prec_correct': 0, 'prec_total': 0})
+        
+        # 1. Use a dictionary that tracks the REAL date object for sorting later
+        # Format: { "12-Oct": { 'stats': {...}, 'real_date': datetime_obj } }
+        history_map = defaultdict(lambda: {
+            'logic_correct': 0, 'logic_total': 0, 
+            'prec_correct': 0, 'prec_total': 0,
+            'real_date': None 
+        })
 
         for log in logs:
-            # Group by Date (YYYY-MM-DD)
-            date_str = log.attempted_at.strftime("%d-%b") # e.g., "12-Oct"
+            # Convert UTC to Local Time (Important so late night exams appear on correct day)
+            local_dt = timezone.localtime(log.attempted_at)
+            date_str = local_dt.strftime("%d-%b") # e.g., "12-Oct"
             
+            # Init the real_date if not set
+            if history_map[date_str]['real_date'] is None:
+                history_map[date_str]['real_date'] = local_dt
+
             # Check Pattern Type
             pat = log.question.pattern
             is_logic = pat in ['elim_classical', 'elim_haphazard']
             is_precision = pat.startswith('zero_g')
             
             if is_logic:
-                data_points[date_str]['logic_total'] += 1
-                if log.is_correct: data_points[date_str]['logic_correct'] += 1
+                history_map[date_str]['logic_total'] += 1
+                if log.is_correct: history_map[date_str]['logic_correct'] += 1
             elif is_precision:
-                data_points[date_str]['prec_total'] += 1
-                if log.is_correct: data_points[date_str]['prec_correct'] += 1
+                history_map[date_str]['prec_total'] += 1
+                if log.is_correct: history_map[date_str]['prec_correct'] += 1
 
-        # Format for Frontend Graph (Lists)
+        # 2. SORTING FIX: Sort by 'real_date', not 'date_str'
+        # This ensures Feb 28 comes before Mar 1
+        sorted_items = sorted(history_map.items(), key=lambda x: x[1]['real_date'])
+        
+        # Take the last 7 days AFTER sorting correctly
+        final_items = sorted_items[-7:]
+
+        # Format for Frontend
         dates = []
         logic_scores = []
         precision_scores = []
 
-        # Limit to last 7 data points (clean graph)
-        sorted_dates = sorted(data_points.keys())[-7:] 
-
-        for d in sorted_dates:
-            stats = data_points[d]
+        for d_str, stats in final_items:
             # Calculate Logic Score %
             l_score = 0
             if stats['logic_total'] > 0:
@@ -657,7 +683,7 @@ class UserHistoryAPI(APIView):
             if stats['prec_total'] > 0:
                 p_score = (stats['prec_correct'] / stats['prec_total']) * 100
             
-            dates.append(d)
+            dates.append(d_str)
             logic_scores.append(round(l_score, 1))
             precision_scores.append(round(p_score, 1))
 
