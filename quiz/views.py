@@ -931,7 +931,16 @@ class ExamAnalysisAPI(APIView):
                     break
             if is_common:
                 target_subject = candidate
-                break 
+                break
+
+        # --- [NEW] FALLBACK: Query params from Flutter when auto-detection fails ---
+        # Prevents global history when subject/year strings don't match OFFICIAL_SUBJECTS
+        year_param = request.query_params.get('year')
+        subject_param = request.query_params.get('subject')
+        if target_year is None and year_param and str(year_param).strip().isdigit():
+            target_year = int(year_param)
+        if target_subject is None and subject_param and str(subject_param).strip():
+            target_subject = str(subject_param).strip()
 
         # B. Construct History Filter (Purity Filter) [PRESERVED]
         history_query = UserAnswerLog.objects.filter(
