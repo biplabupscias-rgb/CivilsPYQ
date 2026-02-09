@@ -211,4 +211,26 @@ class UserQuestionNote(models.Model):
     def __str__(self):
         return f"Note: {self.user.username} - Q{self.question.id}"
     
+# --- [NEW] EXAM CUTOFF MODEL ---
+class ExamCutoff(models.Model):
+    exam_name = models.CharField(max_length=100, default="UPSC CSE")
+    year = models.IntegerField()
+    
+    # The Scores
+    general = models.FloatField(help_text="General Category Cutoff")
+    ews = models.FloatField(help_text="EWS Cutoff")
+    obc = models.FloatField(help_text="OBC Cutoff")
+    sc = models.FloatField(help_text="SC Cutoff")
+    st = models.FloatField(help_text="ST Cutoff")
+    
+    # Meta Info
+    is_official = models.BooleanField(default=True, help_text="Uncheck if this is just an estimate/prediction")
+    
+    class Meta:
+        unique_together = ('exam_name', 'year') # Ensures you don't accidentally add 2024 twice
+        ordering = ['-year']
+
+    def __str__(self):
+        return f"{self.exam_name} {self.year} (Gen: {self.general})"
+    
 

@@ -14,22 +14,9 @@ from django.db.models import Avg
 from django.db.models import Max
 from django.utils import timezone
 
-from .models import Question, KnowledgeConcept, KeywordAnalysis, TopicMedia, UserAnswerLog, Option, UserQuestionNote
+from .models import Question, KnowledgeConcept, KeywordAnalysis, TopicMedia, UserAnswerLog, Option, UserQuestionNote, ExamCutoff
 from .serializers import QuestionSerializer, KnowledgeConceptSerializer, KeywordAnalysisSerializer
-# --- OFFICIAL UPSC CUTOFF DATABASE ---
-# Format: { 'Exam Name': { Year: Cutoff_Score } }
-CUTOFF_DB = {
-    "UPSC CSE": {
-        2024: 90.0, # Expected/Estimated
-        2023: 75.41,
-        2022: 88.22,
-        2021: 87.54,
-        2020: 92.51,
-        2019: 98.00,
-        2018: 98.00,
-        2017: 105.34,
-    }
-}
+
 
 User = get_user_model() 
 
@@ -877,32 +864,46 @@ class ExamAnalysisAPI(APIView):
         
         # --- [NEW] FEATURE 2: CUTOFF AI BRAIN ---
         # We place this here because we just found 'context_exam' and 'first_q.year'
+        # --- [NEW] FEATURE 2: CUTOFF AI BRAIN (DATABASE VERSION) ---
         cutoff_analysis = {"status": "N/A", "gap": 0, "message": "No official data."}
-        context_year = first_q.year
-
-        if context_exam in CUTOFF_DB:
-            if context_year in CUTOFF_DB[context_exam]:
-                val = CUTOFF_DB[context_exam][context_year]
-                if val == "AWAITED":
-                     cutoff_analysis = {
-                        "status": "AWAITED", "gap": 0, 
-                        "message": "Official Cutoff Awaited. Target 90+ to be safe."
-                    }
+        
+        # GATEKEEPER: Only show cutoff if this is a "Year-wise" exam
+        # We check if the session_id starts with "year_" (which we set in Flutter)
+        is_year_exam = str(session_id).startswith("year_")
+        
+        if is_year_exam:
+            context_year = first_q.year
+            
+            # 1. Query the Database
+            cutoff_obj = ExamCutoff.objects.filter(exam_name=context_exam, year=context_year).first()
+            
+            if cutoff_obj:
+                # 2. Calculate Gap (Based on General Category by default)
+                official_cutoff = cutoff_obj.general
+                user_score = current_stats['score_card']['actual_score']
+                gap = user_score - official_cutoff
+                
+                if gap >= 0:
+                    status_label = "CLEARED" 
+                    msg = f"Safe Zone! (+{round(gap, 2)})"
                 else:
-                    official_cutoff = float(val)
-                    user_score = current_stats['score_card']['actual_score']
-                    gap = user_score - official_cutoff
-                    
-                    if gap >= 0:
-                        cutoff_analysis = {
-                            "status": "CLEARED", "gap": round(gap, 2),
-                            "message": f"Safe Zone! (+{round(gap, 2)} > {official_cutoff})"
-                        }
-                    else:
-                        cutoff_analysis = {
-                            "status": "FAILED", "gap": round(gap, 2),
-                            "message": f"Missed by {abs(round(gap, 2))}. (Cutoff: {official_cutoff})"
-                        }
+                    status_label = "FAILED"
+                    msg = f"Missed by {abs(round(gap, 2))}"
+
+                # 3. Construct the Full Package (General + Categories)
+                cutoff_analysis = {
+                    "status": status_label,
+                    "gap": round(gap, 2),
+                    "message": msg,
+                    "breakdown": {
+                        "General": cutoff_obj.general,
+                        "EWS": cutoff_obj.ews,
+                        "OBC": cutoff_obj.obc,
+                        "SC": cutoff_obj.sc,
+                        "ST": cutoff_obj.st,
+                    },
+                    "is_official": cutoff_obj.is_official
+                }
 
         # --- CONTINUING YOUR PRESERVED LOGIC ---
         

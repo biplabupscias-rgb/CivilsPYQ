@@ -13,7 +13,7 @@ from .admin_resource import QuestionResource
 # Import models
 from .models import (
     Question, Option, KnowledgeConcept, KeywordAnalysis, 
-    TopicMedia, CustomUser, UserAnswerLog
+    TopicMedia, CustomUser, UserAnswerLog, ExamCutoff
 )
 
 # --- CONFIG ---
@@ -125,3 +125,9 @@ class CustomUserAdmin(UserAdmin):
     fieldsets = UserAdmin.fieldsets + (
         ('Subscription Status', {'fields': ('is_premium',)}),
     )
+@admin.register(ExamCutoff)
+class ExamCutoffAdmin(admin.ModelAdmin):
+    list_display = ('exam_name', 'year', 'general', 'obc', 'sc', 'st', 'is_official')
+    list_filter = ('exam_name', 'is_official')
+    ordering = ('-year',)
+    list_editable = ('general', 'is_official') # Allows quick editing in the list view
