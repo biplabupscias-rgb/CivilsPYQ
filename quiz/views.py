@@ -13,6 +13,8 @@ from .models import UserAnswerLog
 from django.db.models import Avg
 from django.db.models import Max
 from django.utils import timezone
+from django.db.models.functions import Cast
+from django.db.models import FloatField
 
 from .models import Question, KnowledgeConcept, KeywordAnalysis, TopicMedia, UserAnswerLog, Option, UserQuestionNote, ExamCutoff
 from .serializers import QuestionSerializer, KnowledgeConceptSerializer, KeywordAnalysisSerializer
@@ -375,7 +377,7 @@ def user_dashboard_api(request):
         })
 
     # --- 1. BASIC STATS (PRESERVED) ---
-    accuracy_data = queryset.aggregate(avg_score=Avg('is_correct'))
+    accuracy_data = queryset.aggregate(avg_score=Avg(Cast('is_correct', FloatField())))
     accuracy = (accuracy_data['avg_score'] or 0.0) * 100
     streak_count = queryset.dates('attempted_at', 'day').count()
 
