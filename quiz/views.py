@@ -2,19 +2,15 @@ import json
 import re
 from rest_framework import generics, status
 from rest_framework.views import APIView
-from rest_framework.response import Response
-from django.db.models import Count, Q 
+from rest_framework.response import Response 
 from django.shortcuts import get_object_or_404
 from django.contrib.auth import get_user_model, authenticate 
 from rest_framework.authtoken.models import Token
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from .models import UserAnswerLog
-from django.db.models import Avg
-from django.db.models import Max
 from django.utils import timezone
-from django.db.models.functions import Cast
-from django.db.models import Count, Q, Avg, Case, When, FloatField
+from django.db.models import Count, Q, Avg, Max, Case, When, FloatField
 
 from .models import Question, KnowledgeConcept, KeywordAnalysis, TopicMedia, UserAnswerLog, Option, UserQuestionNote, ExamCutoff
 from .serializers import QuestionSerializer, KnowledgeConceptSerializer, KeywordAnalysisSerializer
@@ -377,8 +373,6 @@ def user_dashboard_api(request):
         })
 
     # --- 1. BASIC STATS (PRESERVED) ---
-    # --- 1. BASIC STATS (FIXED FOR POSTGRES) ---
-    # Logic: "If is_correct is True, count it as 1.0. If False, count as 0.0. Then Average it."
     accuracy_data = queryset.aggregate(
         avg_score=Avg(
             Case(
@@ -388,6 +382,8 @@ def user_dashboard_api(request):
             )
         )
     )
+    accuracy = (accuracy_data['avg_score'] or 0.0) * 100
+    streak_count = queryset.dates('attempted_at', 'day').count()
     accuracy = (accuracy_data['avg_score'] or 0.0) * 100
     streak_count = queryset.dates('attempted_at', 'day').count()
 
