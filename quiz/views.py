@@ -205,16 +205,16 @@ class GameModeView(APIView):
 def save_user_answer(request):
     data = request.data
     try:
-        # 1. Get the Question
+        # --- 1. GET OBJECTS (Safe Lookup) ---
         question = Question.objects.get(id=data['question_id'])
         
-        # 2. Get the Option (Safe Lookup)
         selected_option = None
-        opt_id = data.get('selected_option_id')
-        if opt_id not in [None, '', 'null']:
-            selected_option = Option.objects.get(id=opt_id)
+        if data.get('selected_option_id'):
+            selected_option = Option.objects.get(id=data['selected_option_id'])
 
-        # 3. Parse JSON & Booleans Safely (Preserving your robustness)
+        # --- 2. PREPARE DATA (Preserving your logic) ---
+        
+        # Handle Eliminated Options (JSON or List)
         eliminated_raw = data.get('eliminated_options', '[]')
         if isinstance(eliminated_raw, str):
             try:
@@ -224,39 +224,47 @@ def save_user_answer(request):
         else:
             eliminated_list = eliminated_raw
 
+        # Handle Booleans
         is_skipped_val = str(data.get('is_skipped', 'false')).lower() == 'true'
         is_bookmarked_val = str(data.get('is_bookmarked', 'false')).lower() == 'true'
         is_correct_val = str(data.get('is_correct', 'false')).lower() == 'true'
         
+        # Handle Confidence Score (Default to 100 if missing)
         try:
             confidence_val = int(float(data.get('confidence_score', 100)))
         except (ValueError, TypeError):
             confidence_val = 100
 
-        # 4. Get Context
-        source_mode = data.get('source_mode', 'practice') 
+        # Handle Source Mode (Exam vs Practice)
+        source_mode = data.get('source_mode', 'practice')
         session_id = data.get('session_id', None)
 
-        # 5. THE FIX: UPDATE OR CREATE
-        # Instead of .create() (which adds a new row), we look for an existing row
-        # for this User + Question + Session and UPDATE it.
-        log, created = UserAnswerLog.objects.update_or_create(
+        # --- 3. BUILD THE DEFAULTS DICTIONARY ---
+        # (This preserves ALL your original fields)
+        defaults_data = {
+            'selected_option': selected_option,
+            'is_correct': is_correct_val,
+            'is_skipped': is_skipped_val,
+            'is_bookmarked': is_bookmarked_val,
+            'time_taken_seconds': int(data.get('time_taken_seconds', 0)), 
+            'confidence_score': confidence_val,
+            'eliminated_options': eliminated_list,
+            'source_mode': source_mode
+        }
+
+        # --- 4. THE FIX (Zombie Bookmark) ---
+        # If user bookmarks this, we MUST make sure it is visible in the library
+        if is_bookmarked_val:
+            defaults_data['is_cleared_from_library'] = False
+
+        # --- 5. SAVE TO DATABASE ---
+        # We pass 'defaults_data' to 'defaults='
+        # We use _, _ to ignore the output variables (Fixes unused variable warning)
+        _, _ = UserAnswerLog.objects.update_or_create(
             user=request.user,
             question=question,
-            session_id=session_id, # Crucial: Updates the log for THIS specific exam attempt
-            defaults={
-                'selected_option': selected_option,
-                'is_correct': is_correct_val,
-                'is_skipped': is_skipped_val,
-                'is_bookmarked': is_bookmarked_val,
-                
-                # OVERWRITE Logic: We trust the App's cumulative time
-                'time_taken_seconds': int(data.get('time_taken_seconds', 0)), 
-                
-                'confidence_score': confidence_val,
-                'eliminated_options': eliminated_list,
-                'source_mode': source_mode
-            }
+            session_id=session_id, 
+            defaults=defaults_data 
         )
 
         return Response({"message": "State Updated"}, status=status.HTTP_200_OK)
@@ -1009,16 +1017,30 @@ class ExamAnalysisAPI(APIView):
         history_list = []
         for meta in past_sessions_meta:
             sid = meta['session_id']
-            h_logs = UserAnswerLog.objects.filter(session_id=sid).select_related('question')
-            h_stats = self._calculate_session_stats(h_logs)
-            local_date = timezone.localtime(meta['date'])
+            
+            # FAST AGGREGATION: 
+            # Instead of calculating heatmaps (heavy), we just count Correct/Wrong (instant).
+            h_agg = UserAnswerLog.objects.filter(session_id=sid).aggregate(
+                correct=Count('id', filter=Q(is_correct=True)),
+                wrong=Count('id', filter=Q(is_correct=False, is_skipped=False)),
+                total=Count('id')
+            )
+            
+            # Safe Logic (Handle None values if DB is empty)
+            c = h_agg['correct'] or 0
+            w = h_agg['wrong'] or 0
+            t = h_agg['total'] or 0
+            
+            # UPSC Scoring Logic (+2, -0.66)
+            score = (c * 2) - (w * 0.66)
+            acc = (c / t * 100) if t > 0 else 0
             
             history_list.append({
                 "session_id": sid,
-                "date": local_date.strftime("%d %b, %H:%M"), 
-                "score": h_stats['score_card']['actual_score'],
-                "accuracy": h_stats['score_card']['accuracy'],
-                "total": h_stats['total_qs']
+                "date": timezone.localtime(meta['date']).strftime("%d %b, %H:%M"), 
+                "score": round(score, 2),
+                "accuracy": round(acc, 1),
+                "total": t
             })
 
         # --- 3. GROWTH REPORT [PRESERVED] ---
