@@ -3,7 +3,8 @@ from django.contrib.postgres.operations import TrigramExtension
 
 class Migration(migrations.Migration):
     dependencies = [
-        ('quiz', '0001_initial'), # Ensure this points to your previous migration!
+        # CHANGE THIS LINE: Point to 0002 instead of 0001
+        ('quiz', '0002_examcutoff'), 
     ]
 
     operations = [
