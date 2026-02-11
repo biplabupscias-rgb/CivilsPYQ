@@ -14,6 +14,8 @@ from django.db.models import Count, Q, Avg, Max, Case, When, FloatField
 
 from .models import Question, KnowledgeConcept, KeywordAnalysis, TopicMedia, UserAnswerLog, Option, UserQuestionNote, ExamCutoff
 from .serializers import QuestionSerializer, KnowledgeConceptSerializer, KeywordAnalysisSerializer
+# Add these specific Postgres imports
+from django.contrib.postgres.search import SearchVector, SearchQuery, SearchRank, TrigramSimilarity
 
 
 User = get_user_model() 
@@ -85,38 +87,45 @@ class QuestionList(generics.ListAPIView):
         if self.request.query_params.get('exam'):
             queryset = queryset.filter(exam_name=self.request.query_params.get('exam'))
 
-        # 2. SUBJECT FILTER (STRICTER MATCH)
-        # For Subjects, we usually WANT exact matches (e.g. "Art" shouldn't find "Earth")
-        # So we keep \b at both ends just for the Subject Filter.
+        # 2. SUBJECT FILTER
         subject_param = self.request.query_params.get('subject')
         if subject_param:
-            clean_subject = re.escape(subject_param)
-            subject_pattern = fr'\b{clean_subject}\b' 
-
             queryset = queryset.filter(
                 Q(subject__iexact=subject_param) | 
-                Q(tags__iregex=subject_pattern)
+                Q(tags__icontains=subject_param)
             )
 
         # 3. YEAR FILTER
         if self.request.query_params.get('year'):
             queryset = queryset.filter(year=self.request.query_params.get('year'))
 
-        # 4. TEXT SEARCH (THE FIX: START BOUNDARY ONLY)
+        # 4. HYBRID SEARCH (Typos + Plurals + Context)
         search_query = self.request.query_params.get('search')
         if search_query:
-            clean_query = search_query.replace('#', '').strip()
-            
-            # --- THE CHANGE IS HERE ---
-            # We use \b at the START to avoid "THEY" matching "HEY".
-            # We REMOVED \b at the END so "Micro" can find "Microorganisms".
-            pattern = fr'\b{re.escape(clean_query)}'
+            clean_query = search_query.strip()
 
-            queryset = queryset.filter(
-                Q(text__iregex=pattern) |                  
-                Q(options__text_content__iregex=pattern) | 
-                Q(tags__iregex=pattern)                     
-            ).distinct()
+            # A. Full Text Search (Handles Plurals: "Microorganisms" == "Microorganism")
+            # We look in Text, Tags, and Options. 'english' config handles stemming.
+            search_vector = (
+                SearchVector('text', weight='A', config='english') +
+                SearchVector('tags', weight='A', config='english') +
+                SearchVector('options__text_content', weight='B', config='english')
+            )
+            search_rank = SearchRank(search_vector, SearchQuery(clean_query, config='english'))
+
+            # B. Trigram Similarity (Handles Typos: "Goverrrnace" ~= "Governance")
+            # We check similarity on the Question Text and Tags
+            similarity = TrigramSimilarity('text', clean_query) + TrigramSimilarity('tags', clean_query)
+
+            queryset = queryset.annotate(
+                rank=search_rank,
+                similarity=similarity
+            ).filter(
+                # Condition 1: High Quality Match (Grammar/Word Stem correct)
+                Q(rank__gte=0.1) | 
+                # Condition 2: Fuzzy Match (Typo correct) - 0.1 means 10% similar
+                Q(similarity__gt=0.1)
+            ).order_by('-rank', '-similarity') # Best matches first
 
         # 5. KEYWORD FILTER
         if self.request.query_params.get('keyword'):
@@ -413,18 +422,24 @@ def user_dashboard_api(request):
     # Insight D: "Second Guessing" (Gut Check)
     unnecessary_doubts = queryset.filter(is_bookmarked=True, is_correct=True).count()
 
-    # --- 3. WEAKEST SUBJECT (PRESERVED) ---
+
+    # --- 3. WEAKEST SUBJECT (OPTIMIZED) ---
     weak_subject = "None"
     lowest_acc = 100.0
-    subjects = queryset.values_list('question__subject', flat=True).distinct()
     
-    for subj in subjects:
+    # We ask the DB to group by subject and count totals in ONE step
+    subject_stats = queryset.values('question__subject').annotate(
+        total=Count('id'),
+        correct=Count('id', filter=Q(is_correct=True))
+    )
+    
+    for stat in subject_stats:
+        subj = stat['question__subject']
         if not subj: continue
-        subj_answers = queryset.filter(question__subject=subj)
-        total = subj_answers.count()
-        correct = subj_answers.filter(is_correct=True).count()
+        
+        total = stat['total']
         if total > 0:
-            acc = (correct / total) * 100
+            acc = (stat['correct'] / total) * 100
             if acc < lowest_acc:
                 lowest_acc = acc
                 weak_subject = subj
@@ -989,20 +1004,21 @@ class ExamAnalysisAPI(APIView):
         year_param = request.query_params.get('year')
         subject_param = request.query_params.get('subject')
 
-        # 3. Apply STRICT Filter based on Session ID Tag
-        # This matches the new ID format we created in Flutter (e.g., "year_2025_..." or "subj_Polity_...")
+       # 3. Apply RELAXED Filter (Tags OR Metadata)
+        # This fixes the issue where old/untagged history was invisible
         
         if year_param and str(year_param).strip().isdigit():
-            # If User asks for 2025 History, ONLY show sessions starting with "year_2025_"
-            target_tag = f"year_{year_param}_"
-            history_query = history_query.filter(session_id__startswith=target_tag)
+            history_query = history_query.filter(
+                Q(session_id__startswith=f"year_{year_param}_") | 
+                Q(question__year=int(year_param)) # Fallback: Check question year
+            )
 
         elif subject_param:
-            # If User asks for Polity History, ONLY show sessions starting with "subj_Polity_"
-            # We clean the string to match Flutter's ID generation (alphanumeric only)
             clean_subj = "".join([c for c in subject_param if c.isalnum()])
-            target_tag = f"subj_{clean_subj}_"
-            history_query = history_query.filter(session_id__startswith=target_tag)
+            history_query = history_query.filter(
+                Q(session_id__startswith=f"subj_{clean_subj}_") |
+                Q(question__subject__iexact=subject_param) # Fallback: Check question subject
+            )
         
         # Get Final Session IDs [PRESERVED]
         past_session_ids = history_query.values_list('session_id', flat=True).distinct()
