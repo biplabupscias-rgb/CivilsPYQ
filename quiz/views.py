@@ -125,7 +125,7 @@ class QuestionList(generics.ListAPIView):
                 Q(rank__gte=0.1) | 
                 # Condition 2: Fuzzy Match (Typo correct) - 0.1 means 10% similar
                 Q(similarity__gt=0.1)
-            ).order_by('-rank', '-similarity') # Best matches first
+            ).order_by('-rank', '-similarity').distinct() # Best matches first
 
         # 5. KEYWORD FILTER
         if self.request.query_params.get('keyword'):
@@ -989,36 +989,27 @@ class ExamAnalysisAPI(APIView):
             target_year = int(year_param)
         if target_subject is None and subject_param and str(subject_param).strip():
             target_subject = str(subject_param).strip()
-
-        # --- B. HISTORY FILTERING (NEW TAG-BASED LOGIC) ---
         
         # 1. Base Query: Get all exams for this user & exam name (e.g., UPSC CSE)
+        # --- B. HISTORY FILTERING (STRICT CONTEXT) ---
         history_query = UserAnswerLog.objects.filter(
-            user=user,
-            session_id__isnull=False,
+            user=user, 
+            session_id__isnull=False, 
             question__exam_name=context_exam, 
             source_mode='exam'
-        ).exclude(session_id=session_id) # Don't show the current session
+        ).exclude(session_id=session_id)
 
-        # 2. Get URL Params (What Flutter is asking for)
         year_param = request.query_params.get('year')
         subject_param = request.query_params.get('subject')
-
-       # 3. Apply RELAXED Filter (Tags OR Metadata)
-        # This fixes the issue where old/untagged history was invisible
         
         if year_param and str(year_param).strip().isdigit():
-            history_query = history_query.filter(
-                Q(session_id__startswith=f"year_{year_param}_") | 
-                Q(question__year=int(year_param)) # Fallback: Check question year
-            )
-
+            # STRICT: Only show history specifically tagged with this year
+            history_query = history_query.filter(session_id__startswith=f"year_{year_param}_")
+            
         elif subject_param:
+            # STRICT: Only show history specifically tagged with this subject
             clean_subj = "".join([c for c in subject_param if c.isalnum()])
-            history_query = history_query.filter(
-                Q(session_id__startswith=f"subj_{clean_subj}_") |
-                Q(question__subject__iexact=subject_param) # Fallback: Check question subject
-            )
+            history_query = history_query.filter(session_id__startswith=f"subj_{clean_subj}_")
         
         # Get Final Session IDs [PRESERVED]
         past_session_ids = history_query.values_list('session_id', flat=True).distinct()
