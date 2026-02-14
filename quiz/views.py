@@ -21,33 +21,59 @@ from django.contrib.postgres.search import SearchVector, SearchQuery, SearchRank
 User = get_user_model() 
 
 # --- 0. AUTH APIs (Login & Signup) ---
-@api_view(['POST'])
+@api_view(['GET', 'POST'])
 @permission_classes([AllowAny])
 def signup_api(request):
+    if request.method == 'GET':
+        return Response({
+            'message': 'Use POST with JSON: username, password, first_name, last_name, email, mobile (optional)',
+            'example': 'POST /api/auth/signup/ with Content-Type: application/json'
+        }, status=status.HTTP_200_OK)
     username = request.data.get('username')
     password = request.data.get('password')
-    
+    first_name = request.data.get('first_name', '').strip()
+    last_name = request.data.get('last_name', '').strip()
+    email = request.data.get('email', '').strip()
+    mobile = request.data.get('mobile', '').strip()
+
     if not username or not password:
         return Response({'error': 'Please provide both username and password'}, status=status.HTTP_400_BAD_REQUEST)
-    
+
     if User.objects.filter(username=username).exists():
         return Response({'error': 'Username already exists'}, status=status.HTTP_400_BAD_REQUEST)
-    
+
     user = User.objects.create_user(username=username, password=password)
-    user.is_premium = False 
+    user.is_premium = False
+    user.first_name = first_name
+    user.last_name = last_name
+    user.email = email or username  # fallback for email if empty
+    user.phone_number = mobile or None
     user.save()
-    
+
     token, _ = Token.objects.get_or_create(user=user)
-    
+
     return Response({
-        'token': token.key, 
+        'token': token.key,
         'username': user.username,
-        'is_premium': user.is_premium 
+        'is_premium': user.is_premium
     }, status=status.HTTP_200_OK)
 
-@api_view(['POST'])
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def profile_api(request):
+    """Returns is_premium for the authenticated user (used by Flutter on startup)."""
+    user = request.user
+    return Response({'is_premium': getattr(user, 'is_premium', False)}, status=status.HTTP_200_OK)
+
+
+@api_view(['GET', 'POST'])
 @permission_classes([AllowAny])
 def login_api(request):
+    if request.method == 'GET':
+        return Response({
+            'message': 'Use POST with JSON: {"username": "...", "password": "..."}',
+            'example': 'POST /api/auth/login/ with Content-Type: application/json'
+        }, status=status.HTTP_200_OK)
     username = request.data.get('username')
     password = request.data.get('password')
     
